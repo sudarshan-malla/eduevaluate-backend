@@ -4,10 +4,10 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 import requests
+import base64
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,29 +16,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Gemini API Key (Railway env var)
+# Gemini API Key
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise Exception("GEMINI_API_KEY is missing. Set it in Railway Environment Variables.")
 
-# -----------------------------
-# Pydantic Models
-# -----------------------------
-class InlineData(BaseModel):
-    data: str
-    mimeType: str
-
-class Part(BaseModel):
-    text: Optional[str] = None
-    inlineData: Optional[InlineData] = None
-
-class EvaluateRequest(BaseModel):
-    parts: List[Part]
 
 class EvaluationReport(BaseModel):
     score: int
     feedback: str
     details: dict
+
+
+class EvaluateRequest(BaseModel):
+    qpImages: List[str]
+    keyImages: List[str]
+    studentImages: List[str]
+
+
+def parseDataUrl(dataUrl: str):
+    parts = dataUrl.split(",")
+    if len(parts) != 2:
+        return None
+
+    return {
+        "inlineData": {
+            "data": parts[1],
+            "mimeType": dataUrl.split(";")[0].split(":")[1] if ":" in dataUrl.split(";")[0] else "image/jpeg"
+        }
+    }
 
 
 @app.get("/")
@@ -49,36 +55,56 @@ def root():
 @app.post("/evaluate", response_model=EvaluationReport)
 async def evaluate_answer_sheet(request: EvaluateRequest):
 
-    parts = request.parts
+    qpImages = request.qpImages
+    keyImages = request.keyImages
+    studentImages = request.studentImages
 
-    # Build the prompt from parts
-    prompt_parts = []
-    for part in parts:
-        if part.text:
-            prompt_parts.append(part.text)
+    parts: list = [
+        {
+            "text": "You are an elite academic examiner.\nPerform OCR on handwritten answers, evaluate strictly,\naward marks accurately, and return JSON only."
+        }
+    ]
 
-    prompt_text = "\n".join(prompt_parts)
+    def addFiles(images, label: str):
+        for i, img in enumerate(images):
+            parsed = parseDataUrl(img)
+            if parsed:
+                parts.append({"text": f"{label} Page {i + 1}"})
+                parts.append(parsed)
 
-    # Gemini API endpoint
+    addFiles(qpImages, "Question Paper")
+    addFiles(keyImages, "Answer Key")
+    addFiles(studentImages, "Student Answer Sheet")
+
+    # Gemini 2.5 Flash API Call
     url = "https://gemini.googleapis.com/v1/models/gemini-2.5-flash:generateMessage"
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {GEMINI_API_KEY}",
+        "Authorization": f"Bearer {GEMINI_API_KEY}"
     }
 
-    system_prompt = """
-You are an elite academic examiner.
-Perform OCR on handwritten answers, evaluate strictly,
-award marks accurately, and return JSON only.
-"""
+    # Prompt logic (kept exactly as your original)
+    prompt_text = "\n".join([p.get("text", "") for p in parts if p.get("text")])
 
     payload = {
         "messages": [
-            {"author": "system", "content": {"content_type": "text", "text": system_prompt}},
-            {"author": "user", "content": {"content_type": "text", "text": prompt_text}},
+            {
+                "author": "system",
+                "content": {
+                    "content_type": "text",
+                    "text": "You are an elite academic examiner.\nPerform OCR on handwritten answers, evaluate strictly,\naward marks accurately, and return JSON only."
+                }
+            },
+            {
+                "author": "user",
+                "content": {
+                    "content_type": "text",
+                    "text": prompt_text
+                }
+            }
         ],
-        "temperature": 0.0,
+        "temperature": 0.0
     }
 
     response = requests.post(url, headers=headers, json=payload)
@@ -87,16 +113,16 @@ award marks accurately, and return JSON only.
         raise HTTPException(status_code=500, detail=response.text)
 
     data = response.json()
-
-    # Extract output text
     output_text = data["candidates"][0]["content"][0]["text"]
 
-    # NOTE:
-    # This assumes Gemini returns JSON in output_text.
-    # If it returns plain text, you must parse it.
+    # Parse JSON from model response
+    try:
+        result_json = eval(output_text)
+    except:
+        result_json = {"result": output_text}
 
     return {
-        "score": 100,
-        "feedback": "Evaluation completed successfully.",
-        "details": {"result": output_text}
+        "score": result_json.get("score", 0),
+        "feedback": result_json.get("feedback", "Evaluation completed successfully."),
+        "details": result_json.get("details", result_json)
     }
