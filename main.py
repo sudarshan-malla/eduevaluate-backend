@@ -3,10 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import os
-import base64
-import uuid
 import requests
-import json
 
 app = FastAPI()
 
@@ -19,10 +16,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Gemini API Key (set in Railway ENV)
+# Gemini API Key (Railway env var)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise Exception("GEMINI_API_KEY is not set in environment variables.")
+    raise Exception("GEMINI_API_KEY is missing. Set it in Railway Environment Variables.")
 
 # -----------------------------
 # Pydantic Models
@@ -44,24 +41,6 @@ class EvaluationReport(BaseModel):
     details: dict
 
 
-# -----------------------------
-# Helper: Save base64 image
-# -----------------------------
-def save_base64_image(base64_data: str, mime: str):
-    try:
-        image_bytes = base64.b64decode(base64_data)
-        ext = mime.split("/")[-1]
-        filename = f"{uuid.uuid4()}.{ext}"
-        filepath = os.path.join("/tmp", filename)
-
-        with open(filepath, "wb") as f:
-            f.write(image_bytes)
-
-        return filepath
-    except:
-        return None
-
-
 @app.get("/")
 def root():
     return {"message": "API is working"}
@@ -72,7 +51,7 @@ async def evaluate_answer_sheet(request: EvaluateRequest):
 
     parts = request.parts
 
-    # Convert parts to prompt
+    # Build the prompt from parts
     prompt_parts = []
     for part in parts:
         if part.text:
@@ -80,7 +59,7 @@ async def evaluate_answer_sheet(request: EvaluateRequest):
 
     prompt_text = "\n".join(prompt_parts)
 
-    # Gemini API URL
+    # Gemini API endpoint
     url = "https://gemini.googleapis.com/v1/models/gemini-2.5-flash:generateMessage"
 
     headers = {
@@ -88,7 +67,6 @@ async def evaluate_answer_sheet(request: EvaluateRequest):
         "Authorization": f"Bearer {GEMINI_API_KEY}",
     }
 
-    # Your prompt
     system_prompt = """
 You are an elite academic examiner.
 Perform OCR on handwritten answers, evaluate strictly,
@@ -104,15 +82,21 @@ award marks accurately, and return JSON only.
     }
 
     response = requests.post(url, headers=headers, json=payload)
+
     if response.status_code != 200:
         raise HTTPException(status_code=500, detail=response.text)
 
     data = response.json()
-    output = data["candidates"][0]["content"][0]["text"]
 
-    # Return output as JSON (assuming model returns JSON)
+    # Extract output text
+    output_text = data["candidates"][0]["content"][0]["text"]
+
+    # NOTE:
+    # This assumes Gemini returns JSON in output_text.
+    # If it returns plain text, you must parse it.
+
     return {
         "score": 100,
         "feedback": "Evaluation completed successfully.",
-        "details": {"result": output}
+        "details": {"result": output_text}
     }
